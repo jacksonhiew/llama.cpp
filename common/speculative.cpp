@@ -149,6 +149,7 @@ struct common_speculative_state {
     virtual void draft(
             const common_params_speculative & params,
             const llama_tokens & prompt_tgt,
+            llama_pos prompt_pos_next,
             llama_token id_last,
             llama_tokens & result) = 0;
 
@@ -296,9 +297,12 @@ struct common_speculative_state_draft : public common_speculative_state {
     void draft(
             const common_params_speculative & params,
             const llama_tokens & prompt_tgt,
+            llama_pos prompt_pos_next,
             llama_token id_last,
             llama_tokens & result) override {
         auto * spec = this;
+
+        GGML_UNUSED(prompt_pos_next);
 
         auto & batch      = spec->batch;
         auto & ctx_tgt    = spec->ctx_tgt;
@@ -570,11 +574,13 @@ struct common_speculative_state_eagle3 : public common_speculative_state {
     void draft(
             const common_params_speculative & params,
             const llama_tokens & prompt_tgt,
+            llama_pos prompt_pos_next,
             llama_token id_last,
             llama_tokens & draft_tokens) override {
         // TODO: implement
         GGML_UNUSED(params);
         GGML_UNUSED(prompt_tgt);
+        GGML_UNUSED(prompt_pos_next);
         GGML_UNUSED(id_last);
         GGML_UNUSED(draft_tokens);
     }
@@ -612,9 +618,12 @@ struct common_speculative_state_mtp : public common_speculative_state {
     void draft(
             const common_params_speculative & params,
             const llama_tokens & prompt_tgt,
+            llama_pos prompt_pos_next,
             llama_token id_last,
             llama_tokens & draft_tokens) override {
         draft_tokens.clear();
+
+        GGML_UNUSED(prompt_tgt);
 
         const llama_model * model = llama_get_model(ctx_tgt);
         const int32_t n_vocab = llama_vocab_n_tokens(llama_model_get_vocab(model));
@@ -643,7 +652,7 @@ struct common_speculative_state_mtp : public common_speculative_state {
             // Last step doesn't need to write back; save a cpy.
             const int32_t i_out = (k + 1 < n_max) ? (int32_t) n_hidden + k
                                                   : -1;
-            const llama_pos pos = (llama_pos) prompt_tgt.size() + k;
+            const llama_pos pos = prompt_pos_next + k;
 
             const int32_t rc = llama_mtp_decode(ctx_tgt, i_in, i_out, pos, cond_tok, logits_buf.data());
             if (rc != 0) {
@@ -682,11 +691,13 @@ struct common_speculative_state_ngram_simple : public common_speculative_state {
     void draft(
             const common_params_speculative & params,
             const llama_tokens & prompt_tgt,
+            llama_pos prompt_pos_next,
             llama_token id_last,
             llama_tokens & result) override {
 
         result = common_ngram_simple_draft(config, prompt_tgt, id_last);
         GGML_UNUSED(params);
+        GGML_UNUSED(prompt_pos_next);
     }
 
     void accept(uint16_t n_accepted) override {
@@ -711,10 +722,12 @@ struct common_speculative_state_ngram_map_k : public common_speculative_state {
     void draft(
             const common_params_speculative & params,
             const llama_tokens & prompt_tgt,
+            llama_pos prompt_pos_next,
             llama_token id_last,
             llama_tokens & result) override {
         common_ngram_map_draft(map, prompt_tgt, id_last, result);
         GGML_UNUSED(params);
+        GGML_UNUSED(prompt_pos_next);
     }
 
     void accept(uint16_t n_accepted) override {
@@ -773,9 +786,11 @@ struct common_speculative_state_ngram_mod : public common_speculative_state {
     void draft(
             const common_params_speculative & params,
             const llama_tokens & prompt_tgt,
+            llama_pos prompt_pos_next,
             llama_token id_last,
             llama_tokens & result) override {
         GGML_UNUSED(params);
+        GGML_UNUSED(prompt_pos_next);
 
         n_draft_last = 0;
 
@@ -898,9 +913,11 @@ struct common_speculative_state_ngram_cache : public common_speculative_state {
     void draft(
             const common_params_speculative & params,
             const llama_tokens & prompt_tgt,
+            llama_pos prompt_pos_next,
             llama_token id_last,
             llama_tokens & result) override {
         GGML_UNUSED(params);
+        GGML_UNUSED(prompt_pos_next);
 
         if (cache_size < prompt_tgt.size() + 1) {
             llama_tokens tokens_new;
@@ -1186,6 +1203,7 @@ llama_tokens common_speculative_draft(
         common_speculative * spec,
         const common_params_speculative & params,
         const llama_tokens & prompt_tgt, // specified in target model vocab
+    llama_pos prompt_pos_next,
         llama_token id_last) {
     llama_tokens result;
 
@@ -1194,7 +1212,7 @@ llama_tokens common_speculative_draft(
     for (auto & impl : spec->impls) {
         {
             common_time_meas tm(impl->t_draft_us, !impl->gen_perf);
-            impl->draft(params, prompt_tgt, id_last, result);
+            impl->draft(params, prompt_tgt, prompt_pos_next, id_last, result);
             impl->n_call_draft++;
         }
 

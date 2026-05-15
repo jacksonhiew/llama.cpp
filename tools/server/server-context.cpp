@@ -346,6 +346,7 @@ struct server_slot {
             // TODO: rework to have a single draft llama_context shared across all slots [TAG_SERVER_SPEC_REWORK]
             //       perform the speculative drafting for all sequences at the same time in a single batch
             const llama_tokens & tokens = prompt.tokens.get_text_tokens();
+            const llama_pos prompt_pos_next = prompt.tokens.pos_next();
 
             const auto & params_spec = task->params.speculative;
 
@@ -359,7 +360,7 @@ struct server_slot {
                 GGML_ASSERT(spec_i_batch.empty());
 
                 // generate a new draft
-                spec_draft = common_speculative_draft(spec.get(), params_spec, tokens, sampled);
+                spec_draft = common_speculative_draft(spec.get(), params_spec, tokens, prompt_pos_next, sampled);
 
                 if (spec_draft.size() > (size_t) n_draft_max) {
                     SLT_WRN(*this, "draft size %d exceeds max %d, truncating\n", (int) spec_draft.size(), n_draft_max);

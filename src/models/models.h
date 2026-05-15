@@ -667,6 +667,16 @@ private:
                 ggml_tensor * input,
                         int   il);
 
+    ggml_tensor * build_mtp_head(
+                       ggml_tensor * h,
+                       ggml_tensor * tok_ids,
+    llm_graph_input_attn_no_cache * inp_attn,
+                       ggml_tensor * inp_pos,
+                               int * sections,
+                               int   il);
+
+    void build_standalone_mtp(int * sections);
+
     const llama_model & model;
 };
 
