@@ -996,10 +996,19 @@ json server_chat_convert_responses_to_chatcmpl(
                 }
             } else if (exists_and_is_string(item, "type") && item.at("type") == "ghost_snapshot") {
                 // Ghost snapshots are IDE side, so should not affect the prompt.
+            } else if (exists_and_is_string(item, "type") && item.at("type") == "item_reference") {
+                const std::string id = json_value(item, "id", std::string());
+                SRV_DBG("rejecting unresolved item_reference id=%s\n", id.c_str());
+                throw std::invalid_argument(
+                    "item_reference_not_found: id=" + (id.empty() ? "<unset>" : id));
             } else {
+                const std::string item_type = json_value(item, "type", std::string("<no-type>"));
+                SRV_WRN("responses recovery: role='<top>', item_type='%s', action='skip_unknown_top_level'\n",
+                        item_type.c_str());
                 chatcmpl_messages.push_back(json {
                     {"role", "assistant"},
-                    {"content", json::array({responses_make_text_content("[unsupported Responses item: " + item.dump() + "]")})},
+                    {"content", json::array({responses_make_text_content(
+                        "[responses recovery: skipped unsupported input item of type '" + item_type + "']")})},
                 });
             }
         }

@@ -5,6 +5,7 @@
 #include "server-http.h"
 #include "server-task.h"
 #include "server-queue.h"
+#include "responses_item_cache.h"
 
 #include "build-info.h"
 #include "common.h"
@@ -641,6 +642,8 @@ public:
 
     // note: chat_params must not be refreshed upon existing sleeping state
     server_chat_params chat_params;
+
+    mutable responses_item_cache responses_items;
 
     server_context_impl() {
         mtmd_helper_log_set(common_log_default_callback, nullptr);
@@ -3615,6 +3618,10 @@ static int32_t prompt_get_n_before_user(
 // server_routes
 //
 
+static void responses_cache_capture(responses_item_cache & cache, const json & payload);
+static bool responses_resolve_item_references(
+        responses_item_cache & cache, json & input_value, std::string & missing_id);
+
 std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
             const server_http_req & req,
             server_task_type type,
@@ -3702,30 +3709,34 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
         auto all_results = rd.wait_for_all(req.should_stop);
         if (all_results.is_terminated) {
             return res; // connection is closed
-        } else if (all_results.error) {
+        }
+        if (all_results.error) {
             res->error(all_results.error->to_json());
             return res;
+        }
+        json arr = json::array();
+        for (auto & result : all_results.results) {
+            GGML_ASSERT(dynamic_cast<server_task_result_cmpl_final*>(result.get()) != nullptr);
+            json result_json = result->to_json();
+            if (res_type == TASK_RESPONSE_TYPE_OAI_RESP) {
+                responses_cache_capture(ctx_server.responses_items, result_json);
+            }
+            arr.push_back(std::move(result_json));
+        }
+        GGML_ASSERT(!arr.empty() && "empty results");
+        if (arr.size() == 1) {
+            // if single request, return single object instead of array
+            res->ok(arr[0]);
+        } else if (res_type == TASK_RESPONSE_TYPE_OAI_CHAT || res_type == TASK_RESPONSE_TYPE_OAI_CMPL) {
+            // if multiple results in OAI format, we need to re-format them
+            json & choices = arr[0]["choices"];
+            for (size_t i = 1; i < arr.size(); i++) {
+                choices.push_back(std::move(arr[i]["choices"][0]));
+            }
+            res->ok(arr[0]);
         } else {
-            json arr = json::array();
-            for (auto & res : all_results.results) {
-                GGML_ASSERT(dynamic_cast<server_task_result_cmpl_final*>(res.get()) != nullptr);
-                arr.push_back(res->to_json());
-            }
-            GGML_ASSERT(!arr.empty() && "empty results");
-            if (arr.size() == 1) {
-                // if single request, return single object instead of array
-                res->ok(arr[0]);
-            } else if (res_type == TASK_RESPONSE_TYPE_OAI_CHAT || res_type == TASK_RESPONSE_TYPE_OAI_CMPL) {
-                // if multiple results in OAI format, we need to re-format them
-                json & choices = arr[0]["choices"];
-                for (size_t i = 1; i < arr.size(); i++) {
-                    choices.push_back(std::move(arr[i]["choices"][0]));
-                }
-                res->ok(arr[0]);
-            } else {
-                // multi-results, non-OAI compat
-                res->ok(arr);
-            }
+            // multi-results, non-OAI compat
+            res->ok(arr);
         }
     } else {
         // in streaming mode, the first error must be treated as non-stream response
@@ -3750,6 +3761,9 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
         // next responses are streamed
         // to be sent immediately
         json first_result_json = first_result->to_json();
+        if (res_type == TASK_RESPONSE_TYPE_OAI_RESP) {
+            responses_cache_capture(ctx_server.responses_items, first_result_json);
+        }
         if (res_type == TASK_RESPONSE_TYPE_ANTHROPIC) {
             res->data = format_anthropic_sse(first_result_json);
         } else if (res_type == TASK_RESPONSE_TYPE_OAI_RESP) {
@@ -3759,7 +3773,7 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
         }
         res->status = 200;
         res->content_type = "text/event-stream";
-        res->next = [res_this = res.get(), res_type, &req](std::string & output) -> bool {
+        res->next = [res_this = res.get(), res_type, &req, &items = ctx_server.responses_items](std::string & output) -> bool {
             static auto format_error = [](task_response_type res_type, const json & res_json) {
                 if (res_type == TASK_RESPONSE_TYPE_ANTHROPIC) {
                     return format_anthropic_sse({
@@ -3856,6 +3870,9 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
                         || dynamic_cast<server_task_result_cmpl_final*>(result.get()) != nullptr
                     );
                     json res_json = result->to_json();
+                    if (res_type == TASK_RESPONSE_TYPE_OAI_RESP) {
+                        responses_cache_capture(items, res_json);
+                    }
                     if (res_type == TASK_RESPONSE_TYPE_ANTHROPIC) {
                         output = format_anthropic_sse(res_json);
                     } else if (res_type == TASK_RESPONSE_TYPE_OAI_RESP) {
@@ -3918,6 +3935,60 @@ static void responses_apply_parser_fields(json & dst, const json & src) {
             dst[key] = src.at(key);
         }
     }
+}
+
+static void responses_cache_put_output(responses_item_cache & cache, const json & output) {
+    if (!output.is_array()) {
+        return;
+    }
+    for (const auto & item : output) {
+        if (!item.is_object()) {
+            continue;
+        }
+        const std::string id = json_value(item, "id", std::string());
+        if (!id.empty()) {
+            cache.put(id, item);
+        }
+    }
+}
+
+static void responses_cache_capture(responses_item_cache & cache, const json & payload) {
+    if (payload.is_object()) {
+        if (payload.contains("output")) {
+            responses_cache_put_output(cache, payload.at("output"));
+        }
+        if (payload.contains("data") && payload.at("data").is_object() &&
+                payload.at("data").contains("response") &&
+                payload.at("data").at("response").is_object() &&
+                payload.at("data").at("response").contains("output")) {
+            responses_cache_put_output(cache, payload.at("data").at("response").at("output"));
+        }
+    } else if (payload.is_array()) {
+        for (const auto & event : payload) {
+            responses_cache_capture(cache, event);
+        }
+    }
+}
+
+static bool responses_resolve_item_references(
+        responses_item_cache & cache, json & input_value, std::string & missing_id) {
+    if (!input_value.is_array()) {
+        return true;
+    }
+    for (auto & item : input_value) {
+        if (!item.is_object() || !item.contains("type") || !item.at("type").is_string() ||
+                item.at("type").get<std::string>() != "item_reference") {
+            continue;
+        }
+        const std::string id = json_value(item, "id", std::string());
+        json resolved;
+        if (id.empty() || !cache.get(id, resolved)) {
+            missing_id = id;
+            return false;
+        }
+        item = resolved;
+    }
+    return true;
 }
 
 std::unique_ptr<server_res_generator> server_routes::create_response(bool bypass_sleep) {
@@ -4317,7 +4388,14 @@ void server_routes::init_routes() {
     this->post_responses_oai = [this](const server_http_req & req) {
         auto res = create_response();
         std::vector<raw_buffer> files;
-        const json response_body = json::parse(req.body);
+        json response_body = json::parse(req.body);
+        if (response_body.contains("input")) {
+            std::string missing_id;
+            if (!responses_resolve_item_references(ctx_server.responses_items, response_body["input"], missing_id)) {
+                throw std::invalid_argument(
+                    "item_reference_not_found: id=" + (missing_id.empty() ? "<unset>" : missing_id));
+            }
+        }
         const std::string web_search_wrapper = header_value(req, "X-Llama-Responses-Web-Search-Wrapper");
         const std::string file_search_wrapper = header_value(req, "X-Llama-Responses-File-Search-Wrapper");
         json body = server_chat_convert_responses_to_chatcmpl(
