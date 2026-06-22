@@ -4020,6 +4020,14 @@ static bool sidecar_request_has_image(const json & body) {
     return false;
 }
 
+static bool sidecar_native_mmproj_configured(const common_params & params) {
+    return !params.mmproj.path.empty() || !params.mmproj.url.empty();
+}
+
+static bool sidecar_vision_enabled(const common_params & params) {
+    return params.sidecar.enabled && params.sidecar.max_rounds > 0;
+}
+
 static std::string sidecar_last_user_text(const json & body) {
     if (!body.contains("messages") || !body.at("messages").is_array()) {
         return "";
@@ -4487,6 +4495,7 @@ void server_routes::init_routes() {
 
         std::string tmpl_default = common_chat_templates_source(meta->chat_params.tmpls.get(), "");
         std::string tmpl_tools   = common_chat_templates_source(meta->chat_params.tmpls.get(), "tool_use");
+        const bool has_inp_image = meta->has_inp_image || sidecar_vision_enabled(params);
 
         json props = {
             { "default_generation_settings", default_generation_settings_for_props },
@@ -4494,7 +4503,7 @@ void server_routes::init_routes() {
             { "model_alias",                 meta->model_name },
             { "model_path",                  meta->model_path },
             { "modalities",                  json {
-                {"vision", meta->has_inp_image},
+                {"vision", has_inp_image},
                 {"audio",  meta->has_inp_audio},
             } },
             { "media_marker",                get_media_marker() },
@@ -4642,8 +4651,9 @@ void server_routes::init_routes() {
         auto res = create_response();
         std::vector<raw_buffer> files;
         json body = json::parse(req.body);
+        bool sidecar_fallback_without_vision = false;
 
-        if (params.sidecar.enabled && params.sidecar.max_rounds > 0 && sidecar_request_has_image(body)) {
+        if (params.sidecar.enabled && params.sidecar.max_rounds > 0 && sidecar_request_has_image(body) && !sidecar_native_mmproj_configured(params)) {
             try {
                 json tool_call;
 
@@ -4714,15 +4724,17 @@ void server_routes::init_routes() {
                     return final_res;
                 }
             } catch (const std::exception & e) {
-                res->error(format_error_response(e.what(), ERROR_TYPE_INVALID_REQUEST));
-                return res;
+                sidecar_fallback_without_vision = true;
+                SRV_WRN("sidecar VLM failed; falling back to text-only LLM response: %s\n", e.what());
             }
         }
 
         json body_parsed = oaicompat_chat_params_parse(
             body,
             meta->chat_params,
-            files);
+            files,
+            /* no_prefill_assistant */ false,
+            /* unsupported_image_as_text */ sidecar_fallback_without_vision);
         return handle_completions_impl(
             req,
             SERVER_TASK_TYPE_COMPLETION,
@@ -4876,6 +4888,11 @@ void server_routes::init_routes() {
         bool ctx_server; // do NOT delete this line
         GGML_UNUSED(ctx_server);
 
+        json capabilities = json::array({"completion"});
+        if (meta->has_mtmd || sidecar_vision_enabled(params)) {
+            capabilities.push_back("multimodal");
+        }
+
         json models = {
             {"models", {
                 {
@@ -4887,7 +4904,7 @@ void server_routes::init_routes() {
                     {"type", "model"},
                     {"description", ""},
                     {"tags", {""}},
-                    {"capabilities", meta->has_mtmd ? json({"completion","multimodal"}) : json({"completion"})},
+                    {"capabilities", capabilities},
                     {"parameters", ""},
                     {"details", {
                         {"parent_model", ""},

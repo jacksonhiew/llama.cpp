@@ -8,9 +8,11 @@
 #include "build-info.h"
 #include "common.h"
 #include "fit.h"
+#include "http.h"
 #include "llama.h"
 #include "log.h"
 
+#include <algorithm>
 #include <atomic>
 #include <clocale>
 #include <exception>
@@ -23,6 +25,45 @@
 
 static std::function<void(int)> shutdown_handler;
 static std::atomic_flag is_terminating = ATOMIC_FLAG_INIT;
+
+static std::string sidecar_health_path(const std::string & request_path) {
+    static const std::string chat_completions_suffix = "/v1/chat/completions";
+    if (string_ends_with(request_path, chat_completions_suffix)) {
+        std::string prefix = request_path.substr(0, request_path.size() - chat_completions_suffix.size());
+        return prefix.empty() ? "/health" : prefix + "/health";
+    }
+    return "/health";
+}
+
+static void server_sidecar_preflight(const common_params & params) {
+    if (!params.sidecar.enabled || params.sidecar.url.empty() || !params.sidecar.mock_response.empty()) {
+        return;
+    }
+
+    try {
+        auto [cli, parts] = common_http_client(params.sidecar.url);
+        const int timeout_seconds = std::min(params.sidecar.timeout_seconds, 10);
+        cli.set_connection_timeout(timeout_seconds, 0);
+        cli.set_read_timeout(timeout_seconds, 0);
+        cli.set_write_timeout(timeout_seconds, 0);
+
+        const std::string health_path = sidecar_health_path(parts.path);
+        auto res = cli.Get(health_path);
+        if (!res) {
+            SRV_WRN("sidecar VLM preflight failed: %s\n", httplib::to_string(res.error()).c_str());
+            return;
+        }
+        if (res->status == 200) {
+            SRV_INF("sidecar VLM preflight passed: GET %s returned 200\n", health_path.c_str());
+        } else {
+            SRV_WRN("sidecar VLM preflight returned status %d from GET %s; requests will fall back to text-only if sidecar inference fails\n",
+                    res->status,
+                    health_path.c_str());
+        }
+    } catch (const std::exception & e) {
+        SRV_WRN("sidecar VLM preflight failed: %s\n", e.what());
+    }
+}
 
 static inline void signal_handler(int signal) {
     if (is_terminating.test_and_set()) {
@@ -93,6 +134,31 @@ int llama_server(int argc, char ** argv) {
     // skip device enumeration so the CUDA primary context stays uncreated
     const bool is_router_server = params.model.path.empty();
     common_params_print_info(params, !is_router_server);
+
+    if (params.sidecar.enabled) {
+        SRV_INF("sidecar VLM enabled: policy=%s, max_rounds=%d, planner_n_predict=%d, max_output_tokens=%d, timeout=%d\n",
+                params.sidecar.policy.c_str(),
+                params.sidecar.max_rounds,
+                params.sidecar.planner_n_predict,
+                params.sidecar.max_output_tokens,
+                params.sidecar.timeout_seconds);
+        if (!params.sidecar.url.empty()) {
+            SRV_INF("sidecar VLM endpoint: %s\n", params.sidecar.url.c_str());
+        }
+        if (!params.sidecar.api_key.empty()) {
+            SRV_INF("%s", "sidecar VLM API key: configured\n");
+        }
+        if (!params.sidecar.mock_response.empty()) {
+            SRV_WRN("%s", "sidecar VLM mock response is configured; HTTP sidecar endpoint will not be called\n");
+        }
+        if (!params.sidecar.model.path.empty() || !params.sidecar.mmproj.path.empty()) {
+            SRV_WRN("%s", "sidecar VLM model/mmproj paths are reserved in this MVP; start a separate sidecar llama-server and use --sidecar-url\n");
+        }
+        if (!params.mmproj.path.empty() || !params.mmproj.url.empty()) {
+            SRV_INF("%s", "native multimodal projector is configured; native VLM path will take precedence over sidecar for image inputs\n");
+        }
+        server_sidecar_preflight(params);
+    }
 
     // validate batch size for embeddings
     // embeddings require all tokens to be processed in a single ubatch
