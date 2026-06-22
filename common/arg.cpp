@@ -2248,6 +2248,96 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.image_max_tokens = value;
         }
     ).set_examples(mmproj_examples).set_env("LLAMA_ARG_IMAGE_MAX_TOKENS"));
+    add_opt(common_arg(
+        {"--sidecar"},
+        "enable sidecar VLM orchestration for image inputs",
+        [](common_params & params) {
+            params.sidecar.enabled = true;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SIDECAR"));
+    add_opt(common_arg(
+        {"--sidecar-model"}, "FILE",
+        "path to the sidecar VLM model file (reserved by the MVP sidecar orchestration layer)",
+        [](common_params & params, const std::string & value) {
+            params.sidecar.enabled = true;
+            params.sidecar.model.path = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SIDECAR_MODEL"));
+    add_opt(common_arg(
+        {"--sidecar-mmproj"}, "FILE",
+        "path to the sidecar VLM multimodal projector file (reserved by the MVP sidecar orchestration layer)",
+        [](common_params & params, const std::string & value) {
+            params.sidecar.enabled = true;
+            params.sidecar.mmproj.path = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SIDECAR_MMPROJ"));
+    add_opt(common_arg(
+        {"--sidecar-url"}, "URL",
+        "OpenAI-compatible /v1/chat/completions endpoint for the sidecar VLM server",
+        [](common_params & params, const std::string & value) {
+            params.sidecar.enabled = true;
+            params.sidecar.url = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SIDECAR_URL"));
+    add_opt(common_arg(
+        {"--sidecar-api-key"}, "KEY",
+        "API key for the sidecar VLM endpoint",
+        [](common_params & params, const std::string & value) {
+            params.sidecar.enabled = true;
+            params.sidecar.api_key = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SIDECAR_API_KEY"));
+    add_opt(common_arg(
+        {"--sidecar-policy"}, "{auto,force}",
+        "sidecar query policy: auto lets the main model request vision evidence, force asks once for every image request (default: auto)",
+        [](common_params & params, const std::string & value) {
+            if (value != "auto" && value != "force") {
+                throw std::invalid_argument("invalid sidecar policy: " + value);
+            }
+            params.sidecar.enabled = true;
+            params.sidecar.policy = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SIDECAR_POLICY"));
+    add_opt(common_arg(
+        {"--sidecar-max-rounds"}, "N",
+        string_format("maximum number of sidecar query rounds per request (default: %d)", params.sidecar.max_rounds),
+        [](common_params & params, int value) {
+            params.sidecar.enabled = true;
+            params.sidecar.max_rounds = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SIDECAR_MAX_ROUNDS"));
+    add_opt(common_arg(
+        {"--sidecar-planner-predict"}, "N",
+        string_format("maximum tokens for the sidecar planning pass (default: %d)", params.sidecar.planner_n_predict),
+        [](common_params & params, int value) {
+            params.sidecar.enabled = true;
+            params.sidecar.planner_n_predict = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SIDECAR_PLANNER_PREDICT"));
+    add_opt(common_arg(
+        {"--sidecar-max-output-tokens"}, "N",
+        string_format("maximum sidecar evidence output tokens (default: %d)", params.sidecar.max_output_tokens),
+        [](common_params & params, int value) {
+            params.sidecar.enabled = true;
+            params.sidecar.max_output_tokens = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SIDECAR_MAX_OUTPUT_TOKENS"));
+    add_opt(common_arg(
+        {"--sidecar-timeout"}, "N",
+        string_format("sidecar HTTP timeout in seconds (default: %d)", params.sidecar.timeout_seconds),
+        [](common_params & params, int value) {
+            params.sidecar.enabled = true;
+            params.sidecar.timeout_seconds = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SIDECAR_TIMEOUT"));
+    add_opt(common_arg(
+        {"--sidecar-mock-response"}, "JSON",
+        "mock sidecar JSON response for deterministic testing of sidecar orchestration",
+        [](common_params & params, const std::string & value) {
+            params.sidecar.enabled = true;
+            params.sidecar.mock_response = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_SIDECAR_MOCK_RESPONSE"));
     if (llama_supports_rpc()) {
         add_opt(common_arg(
             {"--rpc"}, "SERVERS",

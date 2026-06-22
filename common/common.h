@@ -391,6 +391,24 @@ struct common_params_diffusion {
     bool    add_gumbel_noise = false; // add gumbel noise to the logits if temp > 0.0
 };
 
+struct common_params_sidecar {
+    bool enabled = false;
+
+    // Reserved for the real sidecar VLM backend. The MVP orchestration layer can
+    // be tested with mock_response before the second model runner is wired in.
+    struct common_params_model model;
+    struct common_params_model mmproj;
+
+    std::string url;
+    std::string api_key;
+    std::string policy = "auto"; // auto = planner pass, force = always ask once
+    int32_t max_rounds = 1;
+    int32_t planner_n_predict = 256;
+    int32_t max_output_tokens = 512;
+    int32_t timeout_seconds = 600;
+    std::string mock_response;
+};
+
 // reasoning API response format (not to be confused as chat template's reasoning format)
 // only used by server
 enum common_reasoning_format {
@@ -571,6 +589,9 @@ struct common_params {
     std::vector<std::string> image; // path to image file(s)
     int image_min_tokens = -1;
     int image_max_tokens = -1;
+
+    // sidecar VLM orchestration for text-only main models
+    struct common_params_sidecar sidecar;
 
     // finetune
     struct lr_opt lr;

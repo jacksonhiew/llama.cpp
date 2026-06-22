@@ -10,6 +10,7 @@
 #include "build-info.h"
 #include "common.h"
 #include "fit.h"
+#include "http.h"
 #include "llama.h"
 #include "log.h"
 #include "sampling.h"
@@ -3991,6 +3992,274 @@ static bool responses_resolve_item_references(
     return true;
 }
 
+static bool sidecar_message_has_image(const json & msg) {
+    if (!msg.is_object() || !msg.contains("content")) {
+        return false;
+    }
+    const json & content = msg.at("content");
+    if (!content.is_array()) {
+        return false;
+    }
+    for (const auto & part : content) {
+        if (part.is_object() && json_value(part, "type", std::string()) == "image_url") {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool sidecar_request_has_image(const json & body) {
+    if (!body.contains("messages") || !body.at("messages").is_array()) {
+        return false;
+    }
+    for (const auto & msg : body.at("messages")) {
+        if (sidecar_message_has_image(msg)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static std::string sidecar_last_user_text(const json & body) {
+    if (!body.contains("messages") || !body.at("messages").is_array()) {
+        return "";
+    }
+    for (auto it = body.at("messages").rbegin(); it != body.at("messages").rend(); ++it) {
+        if (!it->is_object() || json_value(*it, "role", std::string()) != "user" || !it->contains("content")) {
+            continue;
+        }
+        const json & content = it->at("content");
+        if (content.is_string()) {
+            return content.get<std::string>();
+        }
+        if (content.is_array()) {
+            std::string text;
+            for (const auto & part : content) {
+                if (part.is_object() && json_value(part, "type", std::string()) == "text") {
+                    if (!text.empty()) {
+                        text += "\n";
+                    }
+                    text += json_value(part, "text", std::string());
+                }
+            }
+            return text;
+        }
+    }
+    return "";
+}
+
+static json sidecar_tool_definition() {
+    return {
+        {"type", "function"},
+        {"function", {
+            {"name", "ask_sidecar_vision"},
+            {"description", "Ask the sidecar vision model for image-grounded evidence needed to answer the user."},
+            {"parameters", {
+                {"type", "object"},
+                {"properties", {
+                    {"question",    {{"type", "string"},  {"description", "Specific visual question to answer from the image."}}},
+                    {"task_type",   {{"type", "string"},  {"description", "One of: ocr, describe, count, chart_reading, identify_object, compare_objects, extract_relevant_visual_facts."}}},
+                    {"need_ocr",    {{"type", "boolean"}, {"description", "Whether exact visible text should be extracted."}}},
+                    {"focus_hint",  {{"type", "string"},  {"description", "Brief visual target or area of interest."}}},
+                    {"region_hint", {{"type", json::array({"string", "null"})}, {"description", "Optional region hint if the user or image context implies one."}}},
+                }},
+                {"required", json::array({"question", "task_type", "need_ocr"})},
+            }},
+        }},
+    };
+}
+
+static void sidecar_prepend_system_message(json & body, const std::string & content) {
+    json & messages = body["messages"];
+    if (!messages.is_array()) {
+        return;
+    }
+    messages.insert(messages.begin(), json {
+        {"role", "system"},
+        {"content", content},
+    });
+}
+
+static json sidecar_make_tool_call(const json & args) {
+    return {
+        {"id", "call_sidecar_" + random_string()},
+        {"type", "function"},
+        {"function", {
+            {"name", "ask_sidecar_vision"},
+            {"arguments", args.dump()},
+        }},
+    };
+}
+
+static json sidecar_force_query_args(const json & body) {
+    const std::string user_text = sidecar_last_user_text(body);
+    return {
+        {"question", user_text.empty() ? "Extract visual facts relevant to the user's request." : user_text},
+        {"task_type", "extract_relevant_visual_facts"},
+        {"need_ocr", true},
+        {"focus_hint", "entire image"},
+        {"region_hint", nullptr},
+    };
+}
+
+static json sidecar_extract_image_parts(const json & body) {
+    json content = json::array();
+    if (!body.contains("messages") || !body.at("messages").is_array()) {
+        return content;
+    }
+    for (const auto & msg : body.at("messages")) {
+        if (!msg.is_object() || !msg.contains("content") || !msg.at("content").is_array()) {
+            continue;
+        }
+        for (const auto & part : msg.at("content")) {
+            if (part.is_object() && json_value(part, "type", std::string()) == "image_url") {
+                content.push_back(part);
+            }
+        }
+    }
+    return content;
+}
+
+static bool sidecar_extract_first_tool_call(const json & response, json & tool_call) {
+    if (!response.contains("choices") || !response.at("choices").is_array() || response.at("choices").empty()) {
+        return false;
+    }
+    const json & choice = response.at("choices").at(0);
+    if (!choice.contains("message") || !choice.at("message").is_object()) {
+        return false;
+    }
+    const json & message = choice.at("message");
+    if (!message.contains("tool_calls") || !message.at("tool_calls").is_array() || message.at("tool_calls").empty()) {
+        return false;
+    }
+    const json & candidate = message.at("tool_calls").at(0);
+    if (!candidate.contains("function") || json_value(candidate.at("function"), "name", std::string()) != "ask_sidecar_vision") {
+        return false;
+    }
+    tool_call = candidate;
+    return true;
+}
+
+static json sidecar_normalize_response_json(json response, const json & tool_call) {
+    if (!response.is_object()) {
+        throw std::runtime_error("sidecar response must be a JSON object");
+    }
+    response["sidecar_tool_call_id"] = json_value(tool_call, "id", std::string());
+    return response;
+}
+
+static json sidecar_normalize_response_text(const std::string & content, const json & tool_call) {
+    try {
+        return sidecar_normalize_response_json(json::parse(content), tool_call);
+    } catch (const std::exception &) {
+        return sidecar_normalize_response_json(json {
+            {"answer", content},
+            {"evidence", json::array()},
+            {"ocr_text", ""},
+            {"uncertainties", json::array({"sidecar returned unstructured text"})},
+            {"confidence", nullptr},
+        }, tool_call);
+    }
+}
+
+static json sidecar_invoke_http(const common_params_sidecar & sidecar, const json & body, const json & tool_call) {
+    if (sidecar.url.empty()) {
+        throw std::runtime_error("sidecar backend is not configured; provide --sidecar-url or --sidecar-mock-response");
+    }
+
+    std::string arguments_raw;
+    const json & function = tool_call.at("function");
+    if (function.contains("arguments")) {
+        if (function.at("arguments").is_string()) {
+            arguments_raw = function.at("arguments").get<std::string>();
+        } else {
+            arguments_raw = function.at("arguments").dump();
+        }
+    }
+
+    json arguments = json::object();
+    if (!arguments_raw.empty()) {
+        arguments = json::parse(arguments_raw);
+    }
+
+    json user_content = json::array({
+        {
+            {"type", "text"},
+            {"text",
+                "Answer the following visual query using only the attached image(s). "
+                "Return a JSON object with keys: answer, evidence, ocr_text, uncertainties, confidence.\n\n"
+                "Visual query:\n" + arguments.dump()},
+        },
+    });
+    for (const auto & image_part : sidecar_extract_image_parts(body)) {
+        user_content.push_back(image_part);
+    }
+
+    json request = {
+        {"stream", false},
+        {"temperature", 0.0},
+        {"top_k", 1},
+        {"max_tokens", sidecar.max_output_tokens},
+        {"messages", json::array({
+            {
+                {"role", "system"},
+                {"content", "You are a sidecar vision model. Return only compact JSON evidence for the main language model. Use null or empty arrays when unsure."},
+            },
+            {
+                {"role", "user"},
+                {"content", user_content},
+            },
+        })},
+    };
+
+    if (!sidecar.model.name.empty()) {
+        request["model"] = sidecar.model.name;
+    }
+
+    auto [cli, parts] = common_http_client(sidecar.url);
+    std::string path = parts.path;
+    if (path.empty() || path == "/") {
+        path = "/v1/chat/completions";
+    }
+    cli.set_connection_timeout(sidecar.timeout_seconds, 0);
+    cli.set_read_timeout(sidecar.timeout_seconds, 0);
+    cli.set_write_timeout(sidecar.timeout_seconds, 0);
+
+    httplib::Headers headers;
+    if (!sidecar.api_key.empty()) {
+        headers.emplace("Authorization", "Bearer " + sidecar.api_key);
+    }
+
+    auto res = cli.Post(path, headers, request.dump(), "application/json; charset=utf-8");
+    if (!res) {
+        throw std::runtime_error("sidecar HTTP request failed: " + httplib::to_string(res.error()));
+    }
+    if (res->status < 200 || res->status >= 300) {
+        throw std::runtime_error(string_format("sidecar HTTP request failed: status %d: %s", res->status, res->body.c_str()));
+    }
+
+    json response = json::parse(res->body);
+    if (response.contains("choices") && response.at("choices").is_array() && !response.at("choices").empty()) {
+        const json & choice = response.at("choices").at(0);
+        if (choice.contains("message") && choice.at("message").contains("content")) {
+            const json & content = choice.at("message").at("content");
+            if (content.is_string()) {
+                return sidecar_normalize_response_text(content.get<std::string>(), tool_call);
+            }
+            return sidecar_normalize_response_json(content, tool_call);
+        }
+    }
+
+    return sidecar_normalize_response_json(response, tool_call);
+}
+
+static json sidecar_invoke(const common_params_sidecar & sidecar, const json & body, const json & tool_call) {
+    if (!sidecar.mock_response.empty()) {
+        return sidecar_normalize_response_json(json::parse(sidecar.mock_response), tool_call);
+    }
+    return sidecar_invoke_http(sidecar, body, tool_call);
+}
+
 std::unique_ptr<server_res_generator> server_routes::create_response(bool bypass_sleep) {
     return std::make_unique<server_res_generator>(queue_tasks, queue_results, params.sleep_idle_seconds, bypass_sleep);
 }
@@ -4373,6 +4642,83 @@ void server_routes::init_routes() {
         auto res = create_response();
         std::vector<raw_buffer> files;
         json body = json::parse(req.body);
+
+        if (params.sidecar.enabled && params.sidecar.max_rounds > 0 && sidecar_request_has_image(body)) {
+            try {
+                json tool_call;
+
+                if (params.sidecar.policy == "force") {
+                    tool_call = sidecar_make_tool_call(sidecar_force_query_args(body));
+                } else {
+                    json planner_body = body;
+                    planner_body["stream"] = false;
+                    planner_body["n"] = 1;
+                    planner_body["max_tokens"] = params.sidecar.planner_n_predict;
+                    planner_body["parallel_tool_calls"] = false;
+                    planner_body["tools"] = json::array({sidecar_tool_definition()});
+                    planner_body["tool_choice"] = "required";
+                    sidecar_prepend_system_message(planner_body,
+                        "For this internal planning pass, call ask_sidecar_vision exactly once with the most specific visual question needed to answer the user. "
+                        "Do not answer the user directly.");
+
+                    std::vector<raw_buffer> planner_files;
+                    json planner_parsed = oaicompat_chat_params_parse(
+                        planner_body,
+                        meta->chat_params,
+                        planner_files,
+                        /* no_prefill_assistant */ true,
+                        /* unsupported_image_as_text */ true);
+
+                    auto planner_res = handle_completions_impl(
+                        req,
+                        SERVER_TASK_TYPE_COMPLETION,
+                        planner_parsed,
+                        planner_files,
+                        TASK_RESPONSE_TYPE_OAI_CHAT);
+
+                    if (planner_res->status != 200) {
+                        return planner_res;
+                    }
+
+                    json planner_response = json::parse(planner_res->data);
+                    if (!sidecar_extract_first_tool_call(planner_response, tool_call)) {
+                        SRV_WRN("%s\n", "sidecar planner did not produce ask_sidecar_vision; continuing without sidecar evidence");
+                    }
+                }
+
+                if (!tool_call.empty()) {
+                    json sidecar_response = sidecar_invoke(params.sidecar, body, tool_call);
+
+                    json final_body = body;
+                    sidecar_prepend_system_message(final_body,
+                        "The following sidecar vision evidence was generated from the image input. "
+                        "Use it as evidence, respect uncertainties, and do not treat it as the final answer.\n"
+                        "<sidecar_vision_evidence>\n" + sidecar_response.dump(2) + "\n</sidecar_vision_evidence>");
+
+                    std::vector<raw_buffer> final_files;
+                    json final_parsed = oaicompat_chat_params_parse(
+                        final_body,
+                        meta->chat_params,
+                        final_files,
+                        /* no_prefill_assistant */ true,
+                        /* unsupported_image_as_text */ true);
+
+                    auto final_res = handle_completions_impl(
+                        req,
+                        SERVER_TASK_TYPE_COMPLETION,
+                        final_parsed,
+                        final_files,
+                        TASK_RESPONSE_TYPE_OAI_CHAT);
+                    final_res->headers["X-Llama-Sidecar-Rounds"] = "1";
+                    final_res->headers["X-Llama-Sidecar-Policy"] = params.sidecar.policy;
+                    return final_res;
+                }
+            } catch (const std::exception & e) {
+                res->error(format_error_response(e.what(), ERROR_TYPE_INVALID_REQUEST));
+                return res;
+            }
+        }
+
         json body_parsed = oaicompat_chat_params_parse(
             body,
             meta->chat_params,

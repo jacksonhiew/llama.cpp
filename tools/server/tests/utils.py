@@ -102,6 +102,13 @@ class ServerProcess:
     chat_template_file: str | None = None
     server_path: str | None = None
     mmproj_url: str | None = None
+    sidecar: bool = False
+    sidecar_url: str | None = None
+    sidecar_api_key: str | None = None
+    sidecar_policy: str | None = None
+    sidecar_mock_response: str | None = None
+    sidecar_max_rounds: int | None = None
+    sidecar_timeout: int | None = None
     media_path: str | None = None
     sleep_idle_seconds: int | None = None
     cache_ram: int | None = None
@@ -243,6 +250,20 @@ class ServerProcess:
             server_args.extend(["--chat-template-file", self.chat_template_file])
         if self.mmproj_url:
             server_args.extend(["--mmproj-url", self.mmproj_url])
+        if self.sidecar:
+            server_args.append("--sidecar")
+        if self.sidecar_url:
+            server_args.extend(["--sidecar-url", self.sidecar_url])
+        if self.sidecar_api_key:
+            server_args.extend(["--sidecar-api-key", self.sidecar_api_key])
+        if self.sidecar_policy:
+            server_args.extend(["--sidecar-policy", self.sidecar_policy])
+        if self.sidecar_mock_response:
+            server_args.extend(["--sidecar-mock-response", self.sidecar_mock_response])
+        if self.sidecar_max_rounds is not None:
+            server_args.extend(["--sidecar-max-rounds", self.sidecar_max_rounds])
+        if self.sidecar_timeout is not None:
+            server_args.extend(["--sidecar-timeout", self.sidecar_timeout])
         if self.media_path:
             server_args.extend(["--media-path", self.media_path])
         if self.sleep_idle_seconds is not None:
