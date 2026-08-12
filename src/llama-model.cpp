@@ -645,6 +645,17 @@ struct ggml_backend_meta_split_state llama_meta_device_get_split_state(const str
                 GGML_ASSERT(segments.size() == 1);
                 return {granularity_q};
             }
+            if (std::regex_match(tensor_name, pattern_attn_gate_weight)) {
+                GGML_ASSERT(segments.size() == 1);
+                const int64_t n_head      = hparams.n_head(il);
+                const int64_t n_embd_head = hparams.n_embd_head_k(il);
+                if (tensor->ne[1] == n_head * n_embd_head) {
+                    return {granularity_q};
+                }
+                if (tensor->ne[1] == n_head) {
+                    return {granularity_q / n_embd_head};
+                }
+            }
 
             const int64_t granularity_kv = granularity_q / n_gqa;
             if (std::regex_match(tensor_name, pattern_kv_weight) ||
