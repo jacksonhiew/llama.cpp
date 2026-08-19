@@ -718,6 +718,7 @@ void llama_model_dflash::graph<is_enc>::build_post_sampling() const {
     const int64_t tokens_per_block = n_tokens / n_blocks;
     const int64_t block_size = std::min<int64_t>(tokens_per_block, hparams.dflash_block_size);
     ggml_tensor * candidates = ggml_top_k(ctx0, res->t_logits, top_k);
+    cb(candidates, "dflash2_candidates", -1);
     ggml_tensor * logits_rows = ggml_reshape_3d(ctx0, res->t_logits, 1, res->t_logits->ne[0], n_tokens);
     ggml_tensor * unary = ggml_reshape_2d(ctx0,
             ggml_get_rows(ctx0, logits_rows, candidates), top_k, n_tokens);

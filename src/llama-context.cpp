@@ -2557,6 +2557,20 @@ llm_graph_cb llama_context::graph_get_cb() const {
                 }
             }
         }
+
+        // DFlash2 selects candidates across the vocabulary dimension. With tensor split,
+        // the shared target logits are split along that same dimension, so TOP_K must run
+        // on one physical backend after the scheduler gathers the complete logits tensor.
+        if (strcmp(name, "dflash2_candidates") == 0 && model.split_mode() == LLAMA_SPLIT_MODE_TENSOR) {
+            const auto * output_dev = model.dev_output();
+            for (const auto & backend : backends) {
+                if (ggml_backend_get_device(backend.get()) == output_dev &&
+                        ggml_backend_supports_op(backend.get(), cur)) {
+                    ggml_backend_sched_set_tensor_backend(sched.get(), cur, backend.get());
+                    break;
+                }
+            }
+        }
     };
 }
 
