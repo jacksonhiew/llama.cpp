@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cassert>
 #include <chrono>
+#include <cmath>
 #include <cinttypes>
 #include <cstring>
 #include <iomanip>
