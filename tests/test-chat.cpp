@@ -1974,6 +1974,47 @@ static void test_convert_responses_to_chatcmpl() {
 
         assert_equals(false, result.contains("tools"));
     }
+
+    // Test function call output with text and image content
+    {
+        json input = json::parse(R"({
+            "input": [
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_123",
+                    "output": [
+                        {
+                            "type": "input_text",
+                            "text": "Image dimensions: 640x480."
+                        },
+                        {
+                            "type": "input_image",
+                            "image_url": "data:image/png;base64,iVBORw0KGgo="
+                        }
+                    ]
+                }
+            ],
+            "model": "test-model"
+        })");
+
+        json result = server_chat_convert_responses_to_chatcmpl(input);
+
+        assert_equals((size_t) 1, result.at("messages").size());
+        const auto & msg = result.at("messages")[0];
+        assert_equals(std::string("tool"), msg.at("role").get<std::string>());
+        assert_equals(std::string("call_123"), msg.at("tool_call_id").get<std::string>());
+        assert_equals((size_t) 2, msg.at("content").size());
+        assert_equals(json {
+            {"text", "Image dimensions: 640x480."},
+            {"type", "text"},
+        }, msg.at("content")[0]);
+        assert_equals(json {
+            {"image_url", json {
+                {"url", "data:image/png;base64,iVBORw0KGgo="}
+            }},
+            {"type", "image_url"},
+        }, msg.at("content")[1]);
+    }
 }
 
 // Shared LFM2 parser cases - all variants use one output format and parser
