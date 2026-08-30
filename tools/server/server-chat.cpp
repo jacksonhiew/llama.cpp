@@ -201,12 +201,33 @@ json server_chat_convert_responses_to_chatcmpl(const json & response_body) {
                         {"tool_call_id", item.at("call_id")},
                     });
                 } else {
-                    json chatcmpl_outputs = item.at("output");
-                    for (json & chatcmpl_output : chatcmpl_outputs) {
-                        if (!chatcmpl_output.contains("type") || chatcmpl_output.at("type") != "input_text") {
-                            throw std::invalid_argument("Output of tool call should be 'Input text'");
+                    json chatcmpl_outputs = json::array();
+                    for (const json & output : item.at("output")) {
+                        const std::string type = json_value(output, "type", std::string());
+
+                        if (type == "input_text") {
+                            if (!output.contains("text")) {
+                                throw std::invalid_argument("'Input text' requires 'text'");
+                            }
+                            chatcmpl_outputs.push_back({
+                                {"text", output.at("text")},
+                                {"type", "text"},
+                            });
+                        } else if (type == "input_image") {
+                            if (!output.contains("image_url")) {
+                                throw std::invalid_argument("'image_url' is required");
+                            }
+                            chatcmpl_outputs.push_back({
+                                {"image_url", json {
+                                    {"url", output.at("image_url")}
+                                }},
+                                {"type", "image_url"},
+                            });
+                        } else if (type == "input_file") {
+                            throw std::invalid_argument("'input_file' is not supported by llamacpp at this moment");
+                        } else {
+                            throw std::invalid_argument("'type' must be one of 'input_text', 'input_image', or 'input_file'");
                         }
-                        chatcmpl_output["type"] = "text";
                     }
                     chatcmpl_messages.push_back(json {
                         {"content",      chatcmpl_outputs},
