@@ -309,10 +309,16 @@ void llama_model_qwen4exp::load_arch_tensors(llama_model_loader & ml) {
 
     tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), { n_embd, n_vocab }, 0);
 
+    // draft-head-only files (no trunk tensors) ship without the hc head mixer;
+    // the MTP graph falls back to nextn.shared_head_norm + the block's own ffn
+    const bool mtp_only = (hparams.n_layer_nextn > 0) &&
+        (ml.get_weight(tn(LLM_TENSOR_HC_ATTN_NORM, "weight", 0).str().c_str()) == nullptr);
+    const int trunk_flags = mtp_only ? TENSOR_NOT_REQUIRED : 0;
+
     // there is no output_norm: the final hyper-connection mixer carries it
-    hc_head_norm = create_tensor(tn(LLM_TENSOR_HC_HEAD_NORM, "weight"), { hc_dim }, 0);
-    hc_head_down = create_tensor(tn(LLM_TENSOR_HC_HEAD_DOWN, "weight"), { hc_dim, hc_lr }, 0);
-    hc_head_up   = create_tensor(tn(LLM_TENSOR_HC_HEAD_UP,   "weight"), { hc_lr, hc_dim }, 0);
+    hc_head_norm = create_tensor(tn(LLM_TENSOR_HC_HEAD_NORM, "weight"), { hc_dim }, trunk_flags);
+    hc_head_down = create_tensor(tn(LLM_TENSOR_HC_HEAD_DOWN, "weight"), { hc_dim, hc_lr }, trunk_flags);
+    hc_head_up   = create_tensor(tn(LLM_TENSOR_HC_HEAD_UP,   "weight"), { hc_lr, hc_dim }, trunk_flags);
 
     output = create_tensor(tn(LLM_TENSOR_OUTPUT, "weight"), { n_embd, n_vocab }, TENSOR_NOT_REQUIRED);
     if (output == NULL) {
@@ -320,7 +326,7 @@ void llama_model_qwen4exp::load_arch_tensors(llama_model_loader & ml) {
     }
 
     // flat [ple_head_dim, n_rows] gather target
-    if (hparams.ple_n_heads > 0) {
+    if (!mtp_only && hparams.ple_n_heads > 0) {
         // the head ranges are what the gather indexes, so they set the minimum row count
         int64_t ple_rows = 0;
         for (uint32_t h = 0; h < hparams.ple_n_heads; ++h) {
@@ -382,6 +388,10 @@ void llama_model_qwen4exp::load_arch_tensors(llama_model_loader & ml) {
 
     for (int il = 0; il < (int) hparams.n_layer_all; ++il) {
         auto & layer = layers[il];
+
+        if (mtp_only && il < n_layer) {
+            continue;
+        }
 
         // the MTP block is structurally a trunk block: is_recr()/is_ple() are both false past
         // the trunk, so it takes the full-attention + MoE path below with no special casing
@@ -464,9 +474,10 @@ void llama_model_qwen4exp::load_arch_tensors(llama_model_loader & ml) {
 
         // the head's own output mixer, mirroring the trunk's hc_head_*: it collapses the
         // hc streams and stands in for the output norm, of which qwen4exp has none
-        layer.nextn.hc_head_norm = create_tensor(tn(LLM_TENSOR_NEXTN_HC_HEAD_NORM, "weight", il), { hc_dim }, flags);
-        layer.nextn.hc_head_down = create_tensor(tn(LLM_TENSOR_NEXTN_HC_HEAD_DOWN, "weight", il), { hc_dim, hc_lr }, flags);
-        layer.nextn.hc_head_up   = create_tensor(tn(LLM_TENSOR_NEXTN_HC_HEAD_UP,   "weight", il), { hc_lr, hc_dim }, flags);
+        layer.nextn.hc_head_norm = create_tensor(tn(LLM_TENSOR_NEXTN_HC_HEAD_NORM, "weight", il), { hc_dim }, TENSOR_NOT_REQUIRED | flags);
+        layer.nextn.hc_head_down = create_tensor(tn(LLM_TENSOR_NEXTN_HC_HEAD_DOWN, "weight", il), { hc_dim, hc_lr }, TENSOR_NOT_REQUIRED | flags);
+        layer.nextn.hc_head_up   = create_tensor(tn(LLM_TENSOR_NEXTN_HC_HEAD_UP,   "weight", il), { hc_lr, hc_dim }, TENSOR_NOT_REQUIRED | flags);
+        layer.nextn.shared_head_norm = create_tensor(tn(LLM_TENSOR_NEXTN_SHARED_HEAD_NORM, "weight", il), { hc_dim }, TENSOR_NOT_REQUIRED | flags);
 
         // qwen4exp sets mtp_use_dedicated_embeddings=false, so these are absent and the
         // head falls back to the trunk's embedding table and LM head
@@ -709,7 +720,13 @@ llama_model_qwen4exp::graph_mtp::graph_mtp(const llama_model & model, const llm_
     GGML_ASSERT(layer.nextn.eh_proj     && "MTP block missing nextn.eh_proj");
     GGML_ASSERT(layer.nextn.enorm       && "MTP block missing nextn.enorm");
     GGML_ASSERT(layer.nextn.hnorm       && "MTP block missing nextn.hnorm");
-    GGML_ASSERT(layer.nextn.hc_head_norm && "MTP block missing nextn.hc_head_norm");
+
+    // files shipped without the head's own mixer use the nextn norm and the
+    // block's ffn projections instead
+    ggml_tensor * head_norm = layer.nextn.hc_head_norm ? layer.nextn.hc_head_norm : layer.nextn.shared_head_norm;
+    ggml_tensor * head_down = layer.nextn.hc_head_down ? layer.nextn.hc_head_down : layer.hc_ffn_down;
+    ggml_tensor * head_up   = layer.nextn.hc_head_up   ? layer.nextn.hc_head_up   : layer.hc_ffn_up;
+    GGML_ASSERT(head_norm && head_down && head_up && "MTP block missing head mixer tensors");
 
     int sections[4];
     std::copy(std::begin(hparams.rope_sections), std::begin(hparams.rope_sections) + 4, sections);
@@ -855,7 +872,7 @@ llama_model_qwen4exp::graph_mtp::graph_mtp(const llama_model & model, const llm_
 
     // the head's own mixer collapses the streams and doubles as the output norm
     cur = build_hc_mix(res_hc,
-            layer.nextn.hc_head_norm, layer.nextn.hc_head_down, layer.nextn.hc_head_up,
+            head_norm, head_down, head_up,
             nullptr, nullptr, -1);
     cb(cur, "mtp_hc_head", -1);
 
