@@ -270,6 +270,7 @@ void llama_memory_hybrid_idx::set_input_qsa(
         ggml_tensor * cell_blk,
         ggml_tensor * blk_cells,
         ggml_tensor * blk_pos,
+        ggml_tensor * mask_row,
         ggml_tensor * bias,
         const llama_ubatch * ubatch,
         uint32_t ratio,
@@ -516,6 +517,29 @@ void llama_memory_hybrid_idx::set_input_qsa(
 
             int64_t q = ubatch->pos[i];
 
+            if (mask_row != nullptr && mask_row->buffer != nullptr) {
+                float * dst_row = (float *) mask_row->data + i*n_kv;
+
+                const bool is_2d = ubatch->is_pos_2d();
+
+                const llama_pos qx = is_2d ? ubatch->pos[i + n_tokens*2] : 0;
+                const llama_pos qy = is_2d ? ubatch->pos[i + n_tokens]   : 0;
+
+                for (int64_t j = 0; j < n_kv; ++j) {
+                    float v = -INFINITY;
+
+                    if (!cells.is_empty(j) && cells.seq_has(j, seq_id) && cells.pos_get(j) <= q) {
+                        v = 0.0f;
+
+                        if (is_2d && cells.pos_get(j) == q && cells.ext_get(j).is_2d_gt(qx, qy)) {
+                            v = -INFINITY;
+                        }
+                    }
+
+                    dst_row[j] = v;
+                }
+            }
+
             if (ranked) {
                 const llama_pos qt = ubatch->pos[i];
                 const llama_pos qy = ubatch->pos[i + n_tokens];
@@ -672,11 +696,12 @@ void llama_memory_hybrid_idx_context::set_input_qsa(
         ggml_tensor * cell_blk,
         ggml_tensor * blk_cells,
         ggml_tensor * blk_pos,
+        ggml_tensor * mask_row,
         ggml_tensor * bias,
         const llama_ubatch * ubatch,
         uint32_t ratio,
         bool blk_bias) const {
     GGML_ASSERT(mem != nullptr);
 
-    mem->set_input_qsa(cell_blk, blk_cells, blk_pos, bias, ubatch, ratio, blk_bias);
+    mem->set_input_qsa(cell_blk, blk_cells, blk_pos, mask_row, bias, ubatch, ratio, blk_bias);
 }
