@@ -2422,7 +2422,8 @@ struct llama_model_qwen4exp : public llama_model_base {
                     ggml_tensor * v_cur,
                     ggml_tensor * top_k,
                           float   kq_scale,
-                            int   il);
+                            int   il,
+                           bool   gather = false);
 
         // the QSA cache layout inputs do not depend on the layer, only on its compress ratio,
         // so the layers sharing a ratio share one input set
@@ -2435,7 +2436,8 @@ struct llama_model_qwen4exp : public llama_model_base {
                     ggml_tensor * inp_pos,
                     ggml_tensor * kq_mask,
                             int * sections,
-                            int   il);
+                            int   il,
+                           bool   gather = false);
 
         ggml_tensor * build_layer_attn_linear(
              llm_graph_input_rs * inp,
