@@ -2729,7 +2729,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_LOAD_MODE"));
     add_opt(common_arg(
-        {"-lzm", "--lazy-mode"}, "MODE",
+        {"-lzm", "--lazy-mode", "--tensor-read-lazy"}, "MODE",
         "on-demand reading of certain tensors, for example per-layer embeddings (default: auto)\n"
         "- on: read the rows of such tensors from disk on demand instead of keeping them resident (requires mmap)\n"
         "- on-direct: like on, but the arch reads the rows with explicit pread()s instead of demand paging the mmap (currently only the qwen4exp PLE table)\n"
