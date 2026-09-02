@@ -2744,6 +2744,20 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_LAZY_MODE"));
     add_opt(common_arg(
+        {"--qwen4exp-exp-moe-mmq"}, "[on|off]",
+        "use direct tiled IQ2_S MMQ for Qwen4Exp routed-MoE prefill on SM75 (default: off)",
+        [](common_params & params, const std::string & value) {
+            if (is_truthy(value)) {
+                params.qwen4exp_moe_mmq = true;
+            } else if (is_falsey(value)) {
+                params.qwen4exp_moe_mmq = false;
+            } else {
+                throw std::runtime_error(
+                    string_format("error: unknown value for --qwen4exp-exp-moe-mmq: '%s'\n", value.c_str()));
+            }
+        }
+    ).set_env("LLAMA_ARG_QWEN4EXP_EXP_MOE_MMQ"));
+    add_opt(common_arg(
         {"--numa"}, "TYPE",
         "attempt optimizations that help on some NUMA systems\n"
         "- distribute: spread execution evenly over all nodes\n"

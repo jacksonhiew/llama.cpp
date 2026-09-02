@@ -1549,6 +1549,9 @@ ggml_tensor * llm_graph_context::build_lora_mm_id(
           ggml_tensor * ids,
           ggml_tensor * w_s) const {
     ggml_tensor * res = ggml_mul_mat_id(ctx0, w, cur, ids);
+    if (arch == LLM_ARCH_QWEN4EXP && cparams.ctx_type == LLAMA_CONTEXT_TYPE_DEFAULT && cparams.qwen4exp_moe_mmq) {
+        ggml_mul_mat_set_hint(res, GGML_HINT_MMQ_TILED);
+    }
 
     if (w_s) {
         const int64_t n_expert = w_s->ne[0];

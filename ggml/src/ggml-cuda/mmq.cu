@@ -3,6 +3,7 @@
 #include "quantize.cuh"
 #include "mmid.cuh"
 
+#include <atomic>
 #include <cstdint>
 
 static void ggml_cuda_mul_mat_q_switch_type(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream) {
@@ -171,7 +172,8 @@ void ggml_cuda_mul_mat_q(
             ne00, ne01, ne1, s01, ne11, s1,
             ne02, ne12, s02, s12, s2,
             ne03, ne13, s03, s13, s3,
-            ne1};
+            ne1,
+            false};
         ggml_cuda_mul_mat_q_switch_type(ctx, args, stream);
         return;
     }
@@ -183,6 +185,19 @@ void ggml_cuda_mul_mat_q(
     const int64_t n_expert_used = ids->ne[0];
     const int64_t ne_get_rows = ne12 * n_expert_used;
     GGML_ASSERT(ne1 == n_expert_used);
+
+    const int32_t hint = ggml_get_op_params_i32(dst, 1);
+    const bool tiled = hint == GGML_HINT_MMQ_TILED && cc == GGML_CUDA_CC_TURING && !fallback && ne02 == 512 &&
+        n_expert_used == 10 && ne12 > 8 && src0->type == GGML_TYPE_IQ2_S;
+
+    if (tiled) {
+        static std::atomic<bool> logged[GGML_TYPE_COUNT]{};
+        if (!logged[src0->type].exchange(true)) {
+            GGML_LOG_INFO("qwen4exp MMQ tiled: device=%d type=%s K=%lld M=%lld tokens=%lld experts=%lld used=%lld\n",
+                ggml_cuda_get_device(), ggml_type_name(src0->type), (long long) ne00, (long long) ne01,
+                (long long) ne12, (long long) ne02, (long long) n_expert_used);
+        }
+    }
 
     ggml_cuda_pool_alloc<int32_t> ids_src1(ctx.pool(), ne_get_rows);
     ggml_cuda_pool_alloc<int32_t> ids_dst(ctx.pool(), ne_get_rows);
@@ -251,7 +266,8 @@ void ggml_cuda_mul_mat_q(
         ne00, ne01, ne_get_rows, s01, ne_get_rows, s1,
         ne02, ne02, s02, s12, s2,
         ne03, ne13, s03, s13, s3,
-        ne12};
+        ne12,
+        tiled};
 
     ggml_cuda_mul_mat_q_switch_type(ctx, args, stream);
 }
