@@ -31,6 +31,7 @@ The QSA conflict resolution retains current master's block grouping, sequence ha
 | PLE offsets and graph reuse | PR #28136 and follow-up `d807f04` | Already present; skipped | Offsets are applied once; direct mode checks staged data and mmap mode checks row indexes. |
 | Qwen4Exp tensor split enablement | Existing tensor metadata implementation | Enabled as `e7ab10349` | Removes the architecture gate so the existing experimental tensor-parallel path can be selected. |
 | Lazy-read CLI compatibility | Former `--tensor-read-lazy` interface | Forward-ported as `aed8fca5f` | Accepts the old spelling as an alias for `--lazy-mode`; mode values keep their existing meaning. |
+| Qwen4Exp routed-MoE MMQ scheduling | Local Nsight profile, SM75 | Experimental working-tree change | `--qwen4exp-exp-moe-mmq on` selects direct tiled MMQ only for Qwen4Exp 512-expert/top-10 prefill on SM75; default `off` keeps stream-K. |
 
 MTP remains explicitly opt-in through `--spec-type draft-mtp`. These supplemental fixes do not change normal prompt-cache storage or default inference behavior.
 

@@ -407,6 +407,7 @@ extern "C" {
         bool kv_unified;  // use a unified buffer across the input sequences when computing the attention
                           // try to disable when n_seq_max > 1 for improved performance when the sequences do not share a large prefix
                           // ref: https://github.com/ggml-org/llama.cpp/pull/14363
+        bool qwen4exp_moe_mmq; // use experimental Qwen4Exp routed-MoE MMQ scheduling [EXPERIMENTAL]
 
         // [EXPERIMENTAL]
         // backend sampler chain configuration (make sure the caller keeps the sampler chains alive)
