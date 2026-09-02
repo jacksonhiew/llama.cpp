@@ -29,5 +29,7 @@ The QSA conflict resolution retains current master's block grouping, sequence ha
 | CUDA MoE MMQ tail padding | issue #27792 | Forward-ported as `5792d17c5` | Uses the padded get-rows extent when selecting `J_max`; no other MMQ behavior changed. |
 | PLE direct-read weight lifetime | PR #28136, `905557969` | Forward-ported as `a4475d7ed` | Keeps tensor file metadata available for direct reads while preserving metadata-only model loading. |
 | PLE offsets and graph reuse | PR #28136 and follow-up `d807f04` | Already present; skipped | Offsets are applied once; direct mode checks staged data and mmap mode checks row indexes. |
+| Qwen4Exp tensor split enablement | Existing tensor metadata implementation | Enabled as `e7ab10349` | Removes the architecture gate so the existing experimental tensor-parallel path can be selected. |
+| Lazy-read CLI compatibility | Former `--tensor-read-lazy` interface | Forward-ported as `aed8fca5f` | Accepts the old spelling as an alias for `--lazy-mode`; mode values keep their existing meaning. |
 
 MTP remains explicitly opt-in through `--spec-type draft-mtp`. These supplemental fixes do not change normal prompt-cache storage or default inference behavior.
