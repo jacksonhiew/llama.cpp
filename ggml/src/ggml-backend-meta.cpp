@@ -2220,6 +2220,18 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend, 
                 n_subgraphs++;
                 i_start = i + 1;
             }
+
+            if (i_start < cgraph->n_nodes) {
+                ggml_tensor * node = cgraph->nodes[cgraph->n_nodes - 1];
+                GGML_ASSERT(node->view_src != nullptr && node->view_src->op == GGML_OP_NONE && ggml_backend_buffer_is_host(node->view_src->buffer));
+
+                for (size_t j = 0; j < n_backends; j++) {
+                    auto & bcj = backend_ctx->backend_configs[j];
+                    bcj.cgraphs[n_subgraphs].offset = i_start;
+                }
+                n_subgraphs++;
+                i_start = cgraph->n_nodes;
+            }
             GGML_ASSERT(i_start == cgraph->n_nodes);
         }
 
