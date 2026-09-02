@@ -22,6 +22,14 @@
 llama_model_qwen4exp::llama_model_qwen4exp(const struct llama_model_params & params) : llama_model_base(params) {}
 llama_model_qwen4exp::~llama_model_qwen4exp() = default;
 
+static bool qwen4exp_perf_trace_enabled() {
+    static const bool enabled = [] {
+        const char * value = getenv("QWEN4EXP_PERF_TRACE");
+        return value != nullptr && atoi(value) != 0;
+    }();
+    return enabled;
+}
+
 #ifndef _WIN32
 // Direct-read path for the lazy PLE table (--lazy-mode on-direct).
 // The n-gram row indices of a whole ubatch are known host-side before the graph
@@ -928,8 +936,20 @@ public:
     virtual ~llm_graph_input_qsa() = default;
 
     void set_input(const llama_ubatch * ubatch) override {
+        const bool trace = qwen4exp_perf_trace_enabled();
+        const int64_t t_start = trace ? ggml_time_us() : 0;
         mctx->get_idx()->set_input_k_idxs(k_idxs, ubatch);
+        const int64_t t_k_idxs = trace ? ggml_time_us() : 0;
         mctx->set_input_qsa(cell_blk, blk_cells, blk_pos, mask_row, bias, ubatch, ratio, blk_bias);
+        if (trace) {
+            const int64_t t_end     = ggml_time_us();
+            const int64_t n_kv      = mctx->get_idx()->get_n_kv();
+            const int64_t n_stream  = mctx->get_n_stream();
+            const int64_t n_blocks  = (n_kv + ratio - 1)/ratio;
+            LLAMA_LOG_INFO("qwen4exp perf: QSA input tokens=%d streams=%" PRId64 " kv=%" PRId64 " blocks=%" PRId64 " ratio=%u kidx=%.3f ms layout=%.3f ms\n",
+                    ubatch->n_tokens, n_stream, n_kv, n_blocks, ratio,
+                    (t_k_idxs - t_start)/1000.0, (t_end - t_k_idxs)/1000.0);
+        }
     }
 
     bool can_reuse(const llm_graph_params & params) override {
@@ -1348,6 +1368,12 @@ ggml_tensor * llama_model_qwen4exp::graph::build_layer_attn(
 
     }
 
+    if (qsa && qwen4exp_perf_trace_enabled()) {
+        LLAMA_LOG_INFO("qwen4exp perf: QSA graph layer=%d tokens=%" PRId64 " streams=%" PRId64 " kv=%" PRId64 " width=%" PRId64 " gather=%d\n",
+                il, n_tokens, mctx_hyb->get_n_stream(), mctx_hyb->get_idx()->get_n_kv(),
+                GGML_PAD((int64_t) hparams.indexer_top_k + hparams.dsv4_compress_ratios[il] - 1, 256), gather);
+    }
+
     ggml_tensor * top_k = qsa ? build_qsa_top_k(mctx_hyb, cur, inp_pos, inp->get_kq_mask(), sections, il, gather) : nullptr;
 
     // Qwen3Next uses a single Q projection that outputs query + gate
@@ -1637,6 +1663,8 @@ public:
 
 void llm_graph_input_ple::set_input(const llama_ubatch * ubatch) {
     const auto & hp = pmodel.hparams;
+    const bool trace = qwen4exp_perf_trace_enabled();
+    const int64_t t_start = trace ? ggml_time_us() : 0;
 
     // an image arrives as an embd batch, so ubatch->token is null, but every position still needs a row for ggml_get_rows
     // stand in the image token id that the reference hashes, or EOS if the file has no such key
@@ -1666,6 +1694,7 @@ void llm_graph_input_ple::set_input(const llama_ubatch * ubatch) {
 
     // predecessors come from the KV cells (ext.tok); apply_ubatch() already stored this ubatch, so its own tokens count too
     mctx->get_prev_tokens(*ubatch, n_prev, prev);
+    const int64_t t_prev = trace ? ggml_time_us() : 0;
 
     for (int64_t i = 0; i < n_tokens; ++i) {
         // an EOS in the window resets everything at or before it
@@ -1694,13 +1723,27 @@ void llm_graph_input_ple::set_input(const llama_ubatch * ubatch) {
             }
         }
     }
+    const int64_t t_hash = trace ? ggml_time_us() : 0;
 
     if (pmodel.ple_reader) {
         staging.resize(idx.size() * pmodel.ple_reader->head_dim * sizeof(float));
         pmodel.ple_reader->gather(idx.data(), (int64_t) idx.size(), (float *) staging.data());
+        const int64_t t_gather = trace ? ggml_time_us() : 0;
         ggml_backend_tensor_set(data, staging.data(), 0, staging.size());
+        if (trace) {
+            const int64_t t_end = ggml_time_us();
+            LLAMA_LOG_INFO("qwen4exp perf: PLE tokens=%" PRId64 " rows=%zu bytes=%zu prev=%.3f ms hash=%.3f ms read_dequant=%.3f ms upload=%.3f ms\n",
+                    n_tokens, idx.size(), staging.size(), (t_prev - t_start)/1000.0,
+                    (t_hash - t_prev)/1000.0, (t_gather - t_hash)/1000.0, (t_end - t_gather)/1000.0);
+        }
     } else {
         ggml_backend_tensor_set(rows, idx.data(), 0, idx.size()*ggml_element_size(rows));
+        if (trace) {
+            const int64_t t_end = ggml_time_us();
+            LLAMA_LOG_INFO("qwen4exp perf: PLE tokens=%" PRId64 " rows=%zu prev=%.3f ms hash=%.3f ms upload=%.3f ms mode=mmap\n",
+                    n_tokens, idx.size(), (t_prev - t_start)/1000.0,
+                    (t_hash - t_prev)/1000.0, (t_end - t_hash)/1000.0);
+        }
     }
 }
 
