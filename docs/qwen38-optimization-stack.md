@@ -33,3 +33,5 @@ The QSA conflict resolution retains current master's block grouping, sequence ha
 | Lazy-read CLI compatibility | Former `--tensor-read-lazy` interface | Forward-ported as `aed8fca5f` | Accepts the old spelling as an alias for `--lazy-mode`; mode values keep their existing meaning. |
 
 MTP remains explicitly opt-in through `--spec-type draft-mtp`. These supplemental fixes do not change normal prompt-cache storage or default inference behavior.
+
+Set `QWEN4EXP_PERF_TRACE=1` to log per-ubatch PLE host timings and QSA input dimensions. The trace is disabled by default and does not change graph computation.
