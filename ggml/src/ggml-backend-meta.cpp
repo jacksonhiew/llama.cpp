@@ -423,11 +423,14 @@ struct ggml_backend_meta_buffer_context {
     int stc_compute_index_next = 0;
     std::vector<ggml_backend_buffer_ptr> bufs;
 
-    // FIXME
-    // The size of the split state cache is unbounded and can theoretically grow infinitely large.
-    // However, it is also expensive to build and clearing it on every rebuild in ggml_backend_meta_graph_compute is too expensive.
+    // Static/model tensors live for the lifetime of this buffer and are safe to cache permanently.
+    // Compute tensors are recreated as cgraphs are rebuilt, so retaining their pointer-keyed split
+    // states forever causes host-memory growth in long-running tensor-parallel workloads.
     static constexpr size_t nbtc = GGML_TENSOR_SIZE - sizeof(ggml_tensor::padding);
-    std::map<std::pair<const ggml_tensor *, bool>, std::pair<ggml_backend_meta_split_state, char[nbtc]>> split_state_cache;
+    using split_state_cache_t =
+        std::map<std::pair<const ggml_tensor *, bool>, std::pair<ggml_backend_meta_split_state, char[nbtc]>>;
+    split_state_cache_t split_state_cache_static;
+    split_state_cache_t split_state_cache_compute[2];
 
     int debug;
 
@@ -1106,16 +1109,24 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
         return split_state;
     };
 
+    GGML_ASSERT(&stc == &buf_ctx->stc_static ||
+                &stc == &buf_ctx->stc_compute[0] ||
+                &stc == &buf_ctx->stc_compute[1]);
+    auto & split_state_cache =
+            (&stc == &buf_ctx->stc_static) ? buf_ctx->split_state_cache_static :
+            (&stc == &buf_ctx->stc_compute[0]) ? buf_ctx->split_state_cache_compute[0] :
+                                                 buf_ctx->split_state_cache_compute[1];
+
     const std::pair key = std::make_pair(tensor, assume_sync);
-    auto it = buf_ctx->split_state_cache.find(key);
-    if (it != buf_ctx->split_state_cache.end() && memcmp(it->second.second, (const char *) tensor, sizeof(it->second.second)) != 0) {
-        buf_ctx->split_state_cache.clear();
-        it = buf_ctx->split_state_cache.end();
+    auto it = split_state_cache.find(key);
+    if (it != split_state_cache.end() && memcmp(it->second.second, (const char *) tensor, sizeof(it->second.second)) != 0) {
+        split_state_cache.clear();
+        it = split_state_cache.end();
     }
 
-    if (it == buf_ctx->split_state_cache.end()) {
-        buf_ctx->split_state_cache[key].first = calculate_split_state();
-        memcpy(buf_ctx->split_state_cache[key].second, tensor, sizeof(buf_ctx->split_state_cache[key].second));
+    if (it == split_state_cache.end()) {
+        split_state_cache[key].first = calculate_split_state();
+        memcpy(split_state_cache[key].second, tensor, sizeof(split_state_cache[key].second));
         if (buf_ctx->debug > 0) {
             std::string srcs_info;
             for (size_t i = 0; i < GGML_MAX_SRC; i++) {
@@ -1143,15 +1154,15 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
                 if (!ne_info.empty()) {
                     ne_info += ", ";
                 }
-                const ggml_backend_meta_split_state & ss = buf_ctx->split_state_cache[key].first;
+                const ggml_backend_meta_split_state & ss = split_state_cache[key].first;
                 ne_info += std::to_string(ss.ne[j]) + "x" + std::to_string(ss.nr[0]);
             }
             GGML_LOG_DEBUG("SPLIT_STATE: {%s} -> %s[%s, %s, {%s}]\n", srcs_info.c_str(), tensor->name, ggml_op_name(tensor->op),
-                ggml_backend_meta_split_axis_name(buf_ctx->split_state_cache[key].first.axis), ne_info.c_str());
+                ggml_backend_meta_split_axis_name(split_state_cache[key].first.axis), ne_info.c_str());
         }
     }
 
-    ggml_backend_meta_split_state ret = buf_ctx->split_state_cache[key].first;
+    ggml_backend_meta_split_state ret = split_state_cache[key].first;
     GGML_ASSERT(ret.axis != GGML_BACKEND_SPLIT_AXIS_NONE);
 #ifndef NDEBUG
     if (ret.axis >= 0 && ret.axis < GGML_MAX_DIMS) {
@@ -1996,6 +2007,12 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend, 
         for (ggml_backend_buffer_t buf : used_buffers) {
             ggml_backend_meta_buffer_context * buf_ctx = (ggml_backend_meta_buffer_context *) buf->context;
             buf_ctx->stc_compute_index_next = buf_ctx->stc_compute_index ^ 1;
+            auto & split_state_cache_compute = buf_ctx->split_state_cache_compute[buf_ctx->stc_compute_index_next];
+            if (buf_ctx->debug > 1 && !split_state_cache_compute.empty()) {
+                GGML_LOG_DEBUG("SPLIT_STATE_CACHE: dropping %zu compute entries before cgraph rebuild\n",
+                    split_state_cache_compute.size());
+            }
+            split_state_cache_compute.clear();
             ggml_backend_meta_simple_tensor_container & stc = buf_ctx->stc_compute[buf_ctx->stc_compute_index_next];
             for (ggml_context_ptr & ctx : stc.ctxs) {
                 ggml_reset(ctx.get());
