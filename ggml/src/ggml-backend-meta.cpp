@@ -430,7 +430,7 @@ struct ggml_backend_meta_buffer_context {
     using split_state_cache_t =
         std::map<std::pair<const ggml_tensor *, bool>, std::pair<ggml_backend_meta_split_state, char[nbtc]>>;
     split_state_cache_t split_state_cache_static;
-    split_state_cache_t split_state_cache_compute;
+    split_state_cache_t split_state_cache_compute[2];
 
     int debug;
 
@@ -1109,8 +1109,13 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
         return split_state;
     };
 
+    GGML_ASSERT(&stc == &buf_ctx->stc_static ||
+                &stc == &buf_ctx->stc_compute[0] ||
+                &stc == &buf_ctx->stc_compute[1]);
     auto & split_state_cache =
-            (&stc == &buf_ctx->stc_static) ? buf_ctx->split_state_cache_static : buf_ctx->split_state_cache_compute;
+            (&stc == &buf_ctx->stc_static) ? buf_ctx->split_state_cache_static :
+            (&stc == &buf_ctx->stc_compute[0]) ? buf_ctx->split_state_cache_compute[0] :
+                                                 buf_ctx->split_state_cache_compute[1];
 
     const std::pair key = std::make_pair(tensor, assume_sync);
     auto it = split_state_cache.find(key);
@@ -2001,12 +2006,13 @@ static enum ggml_status ggml_backend_meta_graph_compute(ggml_backend_t backend, 
         }
         for (ggml_backend_buffer_t buf : used_buffers) {
             ggml_backend_meta_buffer_context * buf_ctx = (ggml_backend_meta_buffer_context *) buf->context;
-            if (buf_ctx->debug > 1 && !buf_ctx->split_state_cache_compute.empty()) {
-                GGML_LOG_DEBUG("SPLIT_STATE_CACHE: dropping %zu compute entries before cgraph rebuild\n",
-                    buf_ctx->split_state_cache_compute.size());
-            }
-            buf_ctx->split_state_cache_compute.clear();
             buf_ctx->stc_compute_index_next = buf_ctx->stc_compute_index ^ 1;
+            auto & split_state_cache_compute = buf_ctx->split_state_cache_compute[buf_ctx->stc_compute_index_next];
+            if (buf_ctx->debug > 1 && !split_state_cache_compute.empty()) {
+                GGML_LOG_DEBUG("SPLIT_STATE_CACHE: dropping %zu compute entries before cgraph rebuild\n",
+                    split_state_cache_compute.size());
+            }
+            split_state_cache_compute.clear();
             ggml_backend_meta_simple_tensor_container & stc = buf_ctx->stc_compute[buf_ctx->stc_compute_index_next];
             for (ggml_context_ptr & ctx : stc.ctxs) {
                 ggml_reset(ctx.get());
