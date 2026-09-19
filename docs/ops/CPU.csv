@@ -13604,3 +13604,7 @@
 "CPU","GATED_DELTA_NET","type=f32,head_count=4,head_size=64,n_seq_tokens=4,n_seqs=2,v_repeat=1,permuted=0,kda=1","support","1","yes","CPU"
 "CPU","GATED_DELTA_NET","type=f32,head_count=8,head_size=32,n_seq_tokens=4,n_seqs=2,v_repeat=2,permuted=0,kda=1","support","1","yes","CPU"
 "CPU","GATED_DELTA_NET","type=f32,head_count=4,head_size=64,n_seq_tokens=4,n_seqs=2,v_repeat=1,permuted=1,kda=1","support","1","yes","CPU"
+"CPU","TURBO_WHT","head_dim=256,n_heads=4,direction=0,group_size=64","support","1","yes","CPU"
+"CPU","TURBO_WHT","head_dim=256,n_heads=4,direction=0,group_size=128","support","1","yes","CPU"
+"CPU","TURBO_WHT","head_dim=256,n_heads=4,direction=1,group_size=64","support","1","yes","CPU"
+"CPU","TURBO_WHT","head_dim=256,n_heads=4,direction=1,group_size=128","support","1","yes","CPU"

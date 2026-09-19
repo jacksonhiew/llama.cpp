@@ -30,6 +30,10 @@ static bool qwen4exp_perf_trace_enabled() {
     return enabled;
 }
 
+static bool qwen4exp_is_turbo_kv(ggml_type type) {
+    return type == GGML_TYPE_TURBO2_0 || type == GGML_TYPE_TURBO3_0 || type == GGML_TYPE_TURBO4_0;
+}
+
 #ifndef _WIN32
 // Direct-read path for the lazy PLE table (--lazy-mode on-direct).
 // The n-gram row indices of a whole ubatch are known host-side before the graph
@@ -518,6 +522,7 @@ ggml_tensor * llama_model_qwen4exp::graph::build_hc_mix(
 
     // grouped RMSNorm: reduce over one stream, then scale all streams with the [n_embd, hc] gamma
     // the converter folded each gamma to (1 + w)
+    w_norm = ggml_reshape_2d(ctx0, w_norm, n_embd, hc);
     ggml_tensor * xn = ggml_mul(ctx0, ggml_rms_norm(ctx0, x, hparams.f_norm_rms_eps), w_norm);
     xn = ggml_reshape_2d(ctx0, xn, hc_dim, nt);
     cb(xn, "hc_norm", il);
@@ -1076,7 +1081,7 @@ ggml_tensor * llama_model_qwen4exp::graph::build_qsa_top_k(
         qsa_inps.emplace((uint32_t) r, inp);
     }
 
-    // cached indexer keys are raw: pooling precedes norm and rotation, so apply neither
+    // cache indexer keys before pooling, norm, and RoPE
     ggml_tensor * k_raw = build_lora_mm(model.layers[il].index_k_proj, cur);
     k_raw = ggml_reshape_3d(ctx0, k_raw, idx_dim, 1, n_tokens);
     cb(k_raw, "indexer_k_raw", il);
@@ -1089,6 +1094,12 @@ ggml_tensor * llama_model_qwen4exp::graph::build_qsa_top_k(
 
     // gathers per stream: blk_cells row s indexes stream s's own cells
     ggml_tensor * members = ggml_get_rows(ctx0, k_all, inp->blk_cells);
+    if (qwen4exp_is_turbo_kv(k_all->type)) {
+        if (!ggml_is_contiguous(members)) {
+            members = ggml_cont(ctx0, members);
+        }
+        members = ggml_turbo_wht(ctx0, members, 1, idx_dim % 128 == 0 ? 128 : 64);
+    }
     members = ggml_reshape_4d(ctx0, members, idx_dim, r, n_blocks, n_stream);
 
     // mean over the block members; r is small, so summing slices beats a transpose plus sum_rows
@@ -1243,6 +1254,16 @@ ggml_tensor * llama_model_qwen4exp::graph::build_attn_qsa(
     }
 
     ggml_tensor * kq_mask = inp->get_kq_mask();
+    ggml_tensor * k = mctx_cur->get_k(ctx0, il);
+    ggml_tensor * v = mctx_cur->get_v(ctx0, il);
+    ggml_tensor * q = q_cur;
+
+    if (qwen4exp_is_turbo_kv(k->type)) {
+        if (!ggml_is_contiguous(q)) {
+            q = ggml_cont(ctx0, q);
+        }
+        q = ggml_turbo_wht(ctx0, q, 0, q->ne[0] % 128 == 0 ? 128 : 64);
+    }
 
     // decode-time sparse gather: instead of masking the full cache (which makes flash
     // attention scan all n_kv cells to use only indexer_top_k of them), copy the selected
@@ -1251,8 +1272,8 @@ ggml_tensor * llama_model_qwen4exp::graph::build_attn_qsa(
     // restricted to single-token-per-stream ubatches (decode), where every stream carries
     // exactly one top-k list, so the gathered K/V stay one tensor per stream.
     if (gather) {
-        ggml_tensor * kf = mctx_cur->get_k(ctx0, il); // [hd_k, n_head_kv, n_kv, ns]
-        ggml_tensor * vf = mctx_cur->get_v(ctx0, il); // [hd_v, n_head_kv, n_kv, ns]
+        ggml_tensor * kf = k; // [hd_k, n_head_kv, n_kv, ns]
+        ggml_tensor * vf = v; // [hd_v, n_head_kv, n_kv, ns]
 
         const int64_t hd_k   = kf->ne[0];
         const int64_t hd_v   = vf->ne[0];
@@ -1299,8 +1320,15 @@ ggml_tensor * llama_model_qwen4exp::graph::build_attn_qsa(
         m_g = ggml_cast(ctx0, m_g, GGML_TYPE_F16);                   // FA wants contiguous F16
         cb(m_g, "qsa_mask_gathered", il);
 
-        ggml_tensor * cur = build_attn_mha(q_cur, k_g, v_g, nullptr, m_g, nullptr, nullptr, kq_scale, il);
+        ggml_tensor * cur = build_attn_mha(q, k_g, v_g, nullptr, m_g, nullptr, nullptr, n_topk, kq_scale, il);
         cb(cur, "kqv_out", il);
+
+        if (qwen4exp_is_turbo_kv(v->type)) {
+            if (!ggml_is_contiguous(cur)) {
+                cur = ggml_cont(ctx0, cur);
+            }
+            cur = ggml_turbo_wht(ctx0, cur, 1, v->ne[0] % 128 == 0 ? 128 : 64);
+        }
 
         // the rotation is its own inverse, so undo it on the value side of the output
         if (inp->self_v_rot) {
@@ -1336,15 +1364,18 @@ ggml_tensor * llama_model_qwen4exp::graph::build_attn_qsa(
     // combine with the original kq mask
     kq_mask_top_k = ggml_add(ctx0, kq_mask_top_k, kq_mask);
 
-    ggml_tensor * q = q_cur;
-    ggml_tensor * k = mctx_cur->get_k(ctx0, il);
-    ggml_tensor * v = mctx_cur->get_v(ctx0, il);
-
     // TODO: enable sparse attention when we are ready
     // ref: https://github.com/ggml-org/llama.cpp/pull/27970
     //ggml_tensor * cur = build_attn_mha(q, k, v, nullptr, kq_mask_top_k, nullptr, nullptr, top_k->ne[0], kq_scale, il);
     ggml_tensor * cur = build_attn_mha(q, k, v, nullptr, kq_mask_top_k, nullptr, nullptr, 0, kq_scale, il);
     cb(cur, "kqv_out", il);
+
+    if (qwen4exp_is_turbo_kv(v->type)) {
+        if (!ggml_is_contiguous(cur)) {
+            cur = ggml_cont(ctx0, cur);
+        }
+        cur = ggml_turbo_wht(ctx0, cur, 1, v->ne[0] % 128 == 0 ? 128 : 64);
+    }
 
     // the rotation is its own inverse, so undo it on the value side of the output
     if (inp->self_v_rot) {
@@ -1389,7 +1420,7 @@ ggml_tensor * llama_model_qwen4exp::graph::build_layer_attn(
 
     if (qsa && qwen4exp_perf_trace_enabled()) {
         LLAMA_LOG_INFO("qwen4exp perf: QSA graph layer=%d tokens=%" PRId64 " streams=%" PRId64 " kv=%" PRId64 " width=%" PRId64 " gather=%d\n",
-                il, n_tokens, mctx_hyb->get_n_stream(), mctx_hyb->get_idx()->get_n_kv(),
+                il, n_tokens, (int64_t) mctx_hyb->get_n_stream(), (int64_t) mctx_hyb->get_idx()->get_n_kv(),
                 GGML_PAD((int64_t) hparams.indexer_top_k + hparams.dsv4_compress_ratios[il] - 1, 256), gather);
     }
 

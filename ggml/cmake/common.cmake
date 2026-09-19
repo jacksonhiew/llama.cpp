@@ -51,7 +51,16 @@ endfunction()
 
 # Determines which FlashAttention vector kernel template instances to compile, returns them in OUT_SRCS.
 function(ggml_cuda_fattn_vec_instances DIR OUT_SRCS)
-    set(FA_TYPES q4_0 q4_1 q5_0 q5_1 q8_0 bf16 f16)
+    set(FA_TYPES_BASE q4_0 q4_1 q5_0 q5_1 q8_0 bf16 f16)
+    set(FA_TYPES_TURBO turbo2_0 turbo3_0 turbo4_0)
+    set(FA_TYPES ${FA_TYPES_BASE} ${FA_TYPES_TURBO})
+    set(FA_TURBO_COMBINATIONS
+        f16-turbo2_0 q8_0-turbo2_0 turbo2_0-f16 turbo2_0-q8_0
+        turbo2_0-turbo2_0 turbo2_0-turbo3_0 turbo2_0-turbo4_0
+        f16-turbo3_0 q8_0-turbo3_0 turbo3_0-f16 turbo3_0-q8_0
+        turbo3_0-turbo2_0 turbo3_0-turbo3_0 turbo3_0-turbo4_0
+        f16-turbo4_0 q8_0-turbo4_0 turbo4_0-f16 turbo4_0-q8_0
+        turbo4_0-turbo2_0 turbo4_0-turbo3_0 turbo4_0-turbo4_0)
 
     string(TOLOWER "${GGML_CUDA_FA_QUANTS}" FA_QUANTS)
     string(STRIP   "${FA_QUANTS}" FA_QUANTS)
@@ -65,11 +74,12 @@ function(ggml_cuda_fattn_vec_instances DIR OUT_SRCS)
 
     if (FA_QUANTS STREQUAL "all")
         set(FA_COMBINATIONS "")
-        foreach (TYPE_V IN LISTS FA_TYPES)
-            foreach (TYPE_K IN LISTS FA_TYPES)
+        foreach (TYPE_V IN LISTS FA_TYPES_BASE)
+            foreach (TYPE_K IN LISTS FA_TYPES_BASE)
                 list(APPEND FA_COMBINATIONS ${TYPE_K}-${TYPE_V})
             endforeach()
         endforeach()
+        list(APPEND FA_COMBINATIONS ${FA_TURBO_COMBINATIONS})
     else()
         set(FA_COMBINATIONS f16-f16)
 

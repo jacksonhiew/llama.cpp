@@ -18751,3 +18751,7 @@
 "CUDA0","CROSS_ENTROPY_LOSS_BACK","type=f32,ne=[30000,1,1,1]","support","1","yes","CUDA"
 "CUDA0","OPT_STEP_ADAMW","type=f32,ne=[10,5,4,3]","support","1","yes","CUDA"
 "CUDA0","OPT_STEP_SGD","type=f32,ne=[10,5,4,3]","support","1","yes","CUDA"
+"CUDA0","TURBO_WHT","head_dim=256,n_heads=4,direction=0,group_size=64","support","1","yes","CUDA"
+"CUDA0","TURBO_WHT","head_dim=256,n_heads=4,direction=0,group_size=128","support","1","yes","CUDA"
+"CUDA0","TURBO_WHT","head_dim=256,n_heads=4,direction=1,group_size=64","support","1","yes","CUDA"
+"CUDA0","TURBO_WHT","head_dim=256,n_heads=4,direction=1,group_size=128","support","1","yes","CUDA"

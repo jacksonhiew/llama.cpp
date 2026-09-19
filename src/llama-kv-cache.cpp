@@ -322,6 +322,9 @@ llama_kv_cache::llama_kv_cache(
             !attn_rot_disable &&
             n_embd_head_k_all > 0 &&
             ggml_is_quantized(type_k) &&
+            type_k != GGML_TYPE_TURBO2_0 &&
+            type_k != GGML_TYPE_TURBO3_0 &&
+            type_k != GGML_TYPE_TURBO4_0 &&
             hparams.n_embd_head_k() % 64 == 0;
 
         // always create Hadamard rotation tensors for DeepSeek lightning indexers
@@ -335,6 +338,9 @@ llama_kv_cache::llama_kv_cache(
             !attn_rot_disable &&
             n_embd_head_v_all > 0 &&
             ggml_is_quantized(type_v) &&
+            type_v != GGML_TYPE_TURBO2_0 &&
+            type_v != GGML_TYPE_TURBO3_0 &&
+            type_v != GGML_TYPE_TURBO4_0 &&
             hparams.n_embd_head_v() % 64 == 0;
     }
 
@@ -1347,7 +1353,12 @@ ggml_tensor * llama_kv_cache::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggm
     }
 
     // store the current K values into the cache
-    return ggml_set_rows(ctx, k, k_cur, k_idxs);
+    ggml_tensor * result = ggml_set_rows(ctx, k, k_cur, k_idxs);
+    if (k->type == GGML_TYPE_TURBO2_0 || k->type == GGML_TYPE_TURBO3_0 || k->type == GGML_TYPE_TURBO4_0) {
+        const int32_t wht_group = n_embd_head % 128 == 0 ? 128 : 64;
+        memcpy(result->op_params, &wht_group, sizeof(wht_group));
+    }
+    return result;
 }
 
 ggml_tensor * llama_kv_cache::cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggml_tensor * v_idxs, int32_t il, const slot_info & sinfo) const {
@@ -1382,7 +1393,12 @@ ggml_tensor * llama_kv_cache::cpy_v(ggml_context * ctx, ggml_tensor * v_cur, ggm
             v = ggml_reshape_2d(ctx, v, n_embd_gqa, kv_size*n_stream);
         }
 
-        return ggml_set_rows(ctx, v, v_cur, v_idxs);
+        ggml_tensor * result = ggml_set_rows(ctx, v, v_cur, v_idxs);
+        if (v->type == GGML_TYPE_TURBO2_0 || v->type == GGML_TYPE_TURBO3_0 || v->type == GGML_TYPE_TURBO4_0) {
+            const int32_t wht_group = n_embd_head % 128 == 0 ? 128 : 64;
+            memcpy(result->op_params, &wht_group, sizeof(wht_group));
+        }
+        return result;
     }
 
     if (ggml_row_size(v_cur->type, n_embd_gqa) == v_cur->nb[2]) {
