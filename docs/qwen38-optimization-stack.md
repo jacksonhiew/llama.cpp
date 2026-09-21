@@ -32,6 +32,8 @@ The QSA conflict resolution retains current master's block grouping, sequence ha
 | Qwen4Exp tensor split enablement | Existing tensor metadata implementation | Enabled as `e7ab10349` | Removes the architecture gate so the existing experimental tensor-parallel path can be selected. |
 | Lazy-read CLI compatibility | Former `--tensor-read-lazy` interface | Forward-ported as `aed8fca5f` | Accepts the old spelling as an alias for `--lazy-mode`; mode values keep their existing meaning. |
 | Qwen4Exp routed-MoE MMQ scheduling | Local Nsight profile, SM75 | Experimental working-tree change | `--qwen4exp-exp-moe-mmq on` selects direct tiled MMQ only for Qwen4Exp 512-expert/top-10 prefill on SM75; default `off` keeps stream-K. |
+| Qwen4Exp CUDA sparse Flash Attention | upstream PR #28770, merge `3cf03257f` | Forward-ported on `feature/qwen38-sm75-sparse-fa` | QSA passes its top-k bound into Flash Attention; CUDA compacts the union of visible KV rows per query tile instead of scanning the full KV window when the sparse gate is profitable. |
+| SM75 adaptive Flash Attention Q tile | upstream issue #28761 | Experimental branch change | On Turing, head dimensions >128 keep a 32-token Q tile through 8K KV and switch to 64 above 8K; head dimensions <=128 may use 64 once the existing small-Q dispatches no longer apply. |
 
 MTP remains explicitly opt-in through `--spec-type draft-mtp`. These supplemental fixes do not change normal prompt-cache storage or default inference behavior.
 
